@@ -1,0 +1,15 @@
+{
+  "name": "mini-mail",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "node --check ui/app.js && node scripts/check-frame-hash.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
+    "install-app": "npm test && tauri build && ditto src-tauri/target/release/bundle/macos/mini-mail.app /Applications/mini-mail.app && rm -rf src-tauri/target/release/bundle"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

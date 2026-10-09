@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mini-mail</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <form id="login" hidden>
+      <h1>mini-mail</h1>
+      <label>
+        Exchange server address
+        <input id="login-url" type="url" placeholder="https://mail.example.com/EWS/Exchange.asmx" required />
+      </label>
+      <label>
+        Username
+        <input id="login-username" type="text" placeholder="DOMAIN\username" autocapitalize="off" spellcheck="false" required />
+      </label>
+      <label>
+        Password
+        <input id="login-password" type="password" required />
+      </label>
+      <button id="login-submit" type="submit">Sign in</button>
+      <p id="login-error" class="error" hidden></p>
+      <p class="hint">The password is kept in the macOS keychain. Messages are never saved to disk.</p>
+    </form>
+
+    <main id="app" hidden>
+      <nav id="folders-pane">
+        <button id="compose-new" type="button" title="New message (N)">Compose</button>
+        <ul id="folders"></ul>
+        <footer>
+          <button id="refresh" type="button" title="Refresh (R)" aria-label="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4" /><path d="M13.5 2v3.2h-3.2" /></svg></button>
+          <button id="signature-open" type="button" title="Signature" aria-label="Signature"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.8 2.3l2.9 2.9-7.4 7.4-3.4.5.5-3.4z" /><path d="M2.5 15h11" /></svg></button>
+          <button id="logout" type="button" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 2.5h-3v11h3" /><path d="M10 5l3 3-3 3" /><path d="M13 8H6.5" /></svg></button>
+        </footer>
+        <div class="splitter" data-var="--w-folders" data-min="140" data-max="420"></div>
+      </nav>
+      <section id="list-pane">
+        <header id="list-title">
+          <span id="list-name"></span>
+          <select id="sort" title="Message order">
+            <option value="date">Newest first</option>
+            <option value="unread">Unread first</option>
+          </select>
+          <input id="search" type="search" placeholder="Search this folder" title="Search (/)" spellcheck="false" />
+        </header>
+        <ul id="messages" tabindex="0"></ul>
+        <div class="splitter" data-var="--w-list" data-min="220" data-max="800"></div>
+      </section>
+      <article id="reader">
+        <p id="reader-empty" class="placeholder">Select a message</p>
+        <div id="reader-content" hidden>
+          <header>
+            <h2 id="msg-subject"></h2>
+            <dl>
+              <dt>From</dt>
+              <dd id="msg-from"></dd>
+              <dt>To</dt>
+              <dd id="msg-to"></dd>
+              <dt id="msg-cc-label">Cc</dt>
+              <dd id="msg-cc"></dd>
+              <dt>Date</dt>
+              <dd id="msg-date"></dd>
+            </dl>
+            <div id="msg-meeting" hidden>
+              <div id="meeting-when"></div>
+              <div id="meeting-where"></div>
+              <div id="meeting-status"></div>
+              <div id="meeting-actions">
+                <button type="button" data-response="accept">Accept</button>
+                <button type="button" data-response="tentative">Tentative</button>
+                <button type="button" data-response="decline">Decline</button>
+              </div>
+            </div>
+            <ul id="msg-attachments"></ul>
+            <div id="msg-actions">
+              <button id="reply" type="button">Reply</button>
+              <button id="reply-all" type="button">Reply all</button>
+              <button id="forward" type="button">Forward</button>
+              <button id="delete" type="button" class="danger" title="Move to Deleted Items">Delete</button>
+            </div>
+          </header>
+          <iframe id="msg-body" sandbox="allow-scripts" title="Message body"></iframe>
+        </div>
+        <form id="compose" hidden>
+          <h2 id="compose-title"></h2>
+          <label>To <input id="compose-to" type="text" autocapitalize="off" spellcheck="false" placeholder="addresses separated by commas" /></label>
+          <label>Cc <input id="compose-cc" type="text" autocapitalize="off" spellcheck="false" /></label>
+          <label>Subject <input id="compose-subject" type="text" /></label>
+          <textarea id="compose-body" placeholder="Message text"></textarea>
+          <ul id="compose-files"></ul>
+          <p id="compose-hint" class="hint"></p>
+          <div class="buttons">
+            <button id="compose-send" type="submit" title="⌘Enter">Send</button>
+            <button id="compose-attach" type="button">Attach file</button>
+            <input id="compose-file-input" type="file" multiple hidden />
+            <button id="compose-cancel" type="button" title="Esc">Cancel</button>
+          </div>
+        </form>
+      </article>
+    </main>
+
+    <dialog id="signature-dialog">
+      <form id="signature-form" method="dialog">
+        <h2>Signature</h2>
+        <textarea id="signature-text" placeholder="Best regards,&#10;First Last"></textarea>
+        <p class="hint">Added to the end of every new message, reply and forward; you can edit it before sending. Stored only on this Mac.</p>
+        <div class="buttons">
+          <button id="signature-save" type="submit">Save</button>
+          <button id="signature-cancel" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <ul id="context-menu" role="menu" hidden></ul>
+    <ul id="suggestions" role="listbox" hidden></ul>
+    <div id="status" role="status"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
