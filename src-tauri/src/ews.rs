@@ -33,7 +33,7 @@ pub struct Client {
 pub struct Folder {
     pub id: String,
     pub name: String,
-    /// inbox | drafts | sent | trash | junk | "" for ordinary folders
+    /// inbox | drafts | sent | outbox | trash | junk | "" for ordinary folders
     pub kind: String,
     pub depth: u32,
     pub total: u32,
@@ -467,11 +467,12 @@ impl Client {
 
     /// Ids of the mailbox root and the standard folders; the tree and its order are built from them.
     async fn well_known_folders(&self) -> Result<HashMap<String, String>> {
-        const NAMES: [(&str, &str); 6] = [
+        const NAMES: [(&str, &str); 7] = [
             ("msgfolderroot", "root"),
             ("inbox", "inbox"),
             ("drafts", "drafts"),
             ("sentitems", "sent"),
+            ("outbox", "outbox"),
             ("deleteditems", "trash"),
             ("junkemail", "junk"),
         ];
@@ -613,9 +614,10 @@ fn build_folder_tree(raw: Vec<RawFolder>, well_known: &HashMap<String, String>) 
         "inbox" => 0,
         "drafts" => 1,
         "sent" => 2,
-        "trash" => 4,
-        "junk" => 5,
-        _ => 3,
+        "outbox" => 3,
+        "trash" => 5,
+        "junk" => 6,
+        _ => 4,
     };
 
     let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -658,9 +660,20 @@ fn build_folder_tree(raw: Vec<RawFolder>, well_known: &HashMap<String, String>) 
 }
 
 fn to_folder(raw: &RawFolder, kind: String, depth: u32) -> Folder {
+    // The server names standard folders in the mailbox language; the app shows them in English.
+    // Folders the user created keep their own names.
+    let name = match kind.as_str() {
+        "inbox" => "Inbox",
+        "drafts" => "Drafts",
+        "sent" => "Sent Items",
+        "outbox" => "Outbox",
+        "trash" => "Deleted Items",
+        "junk" => "Junk Email",
+        _ => raw.name.as_str(),
+    };
     Folder {
         id: raw.id.clone(),
-        name: raw.name.clone(),
+        name: name.to_string(),
         kind,
         depth,
         total: raw.total,
@@ -954,7 +967,7 @@ mod tests {
         let folders = vec![
             raw("a", "root", "Archive", "IPF.Note"),
             raw("cal", "root", "Calendar", "IPF.Appointment"),
-            raw("in", "root", "Inbox", "IPF.Note"),
+            raw("in", "root", "Posteingang", "IPF.Note"),
             raw("sub", "in", "Project", "IPF.Note"),
             raw("lost", "cal", "Orphan", "IPF.Note"),
         ];
@@ -965,6 +978,9 @@ mod tests {
         let tree = build_folder_tree(folders, &well_known);
         let shape: Vec<(&str, u32)> = tree.iter().map(|f| (f.id.as_str(), f.depth)).collect();
         assert_eq!(shape, [("in", 0), ("sub", 1), ("a", 0), ("lost", 0)]);
+        // A standard folder is shown in English whatever the mailbox language; others keep their names
+        let names: Vec<&str> = tree.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Inbox", "Project", "Archive", "Orphan"]);
     }
 
     #[test]

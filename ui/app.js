@@ -301,7 +301,7 @@ $("messages").addEventListener("contextmenu", (event) => {
   const row = event.target.closest("li[data-index]");
   if (!row) return;
   const index = Number(row.dataset.index);
-  const targets = state.folders.filter((f) => f.id !== state.folder.id && f.kind !== "drafts");
+  const targets = state.folders.filter((f) => f.id !== state.folder.id && f.kind !== "drafts" && f.kind !== "outbox");
   showContextMenu(event, [
     ["Move to folder:"],
     ...targets.map((folder) => ["\u00a0\u00a0".repeat(folder.depth) + folder.name, () => moveMessage(index, folder)]),

@@ -231,9 +231,41 @@ ul {
   stroke-linejoin: round;
 }
 
+/* The app's web view does not show native `title` tooltips, so icon buttons draw their own */
+#folders-pane footer button {
+  position: relative;
+}
+
+#folders-pane footer button::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 5;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: #fff;
+  background: rgba(30, 32, 40, 0.95);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+#folders-pane footer button:hover::after {
+  opacity: 1;
+  transition-delay: 0.4s;
+}
+
 /* "Sign out" sits apart on the right so it is not hit by accident */
 #logout {
   margin-left: auto;
+}
+
+#folders-pane footer #logout::after {
+  left: auto;
+  right: 0;
 }
 
 #list-pane {
