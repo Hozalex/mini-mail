@@ -758,6 +758,11 @@ ul {
   gap: 6px;
 }
 
+#compose-discard {
+  margin-left: auto;
+  color: var(--error);
+}
+
 #compose-send {
   color: #fff;
   background: var(--accent);

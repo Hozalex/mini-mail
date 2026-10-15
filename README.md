@@ -12,6 +12,8 @@ Tested against Exchange 2013 with Basic authentication over HTTPS.
 - Message list ordered newest first or unread first, loaded 50 at a time.
 - HTML messages with inline images, dark mode, links that open in the browser.
 - New message, reply, reply all, forward; file attachments; a persistent signature.
+- Drafts on the server: an unfinished message is saved to Drafts when you leave it, any number
+  can wait there, and opening one brings it back for editing.
 - Recipient suggestions from the company address book and personal contacts.
 - Attachments download to the Downloads folder.
 - Search in the open folder (Outlook syntax: `from:ivan`, `subject:report`).
@@ -86,7 +88,7 @@ build, and the app is only signed locally. Choose Always Allow.
 | R | Refresh |
 | / | Search the folder |
 | ⌘Enter | Send |
-| Esc | Close an empty message, clear the search |
+| Esc | Put the message being written away into Drafts, clear the search |
 
 Shortcuts are matched by physical key, so they work in any keyboard layout.
 
@@ -106,6 +108,9 @@ Shortcuts are matched by physical key, so they work in any keyboard layout.
 - One account.
 - No offline mode: without a connection the app shows nothing.
 - Messages are written as plain text, without formatting.
+- Files attached to an unfinished message are not kept in its draft; attach them before sending.
+- A reply draft holds only your text; the quoted original is added when it is sent from mini-mail.
+- There is no autosave: a message still open in the form is lost if the app quits.
 - Search covers the open folder, not the whole mailbox.
 - Attached messages (a message attached to a message) cannot be downloaded.
 - New mail is checked once a minute and only while the app is running.

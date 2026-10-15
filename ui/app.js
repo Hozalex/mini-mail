@@ -407,7 +407,13 @@ function renderMessages() {
       el("div", "subject", (message.isMeeting ? "📅 " : "") + (message.hasAttachments ? "📎 " : "") + (message.subject || "(no subject)")),
       el("div", "preview", message.preview),
     );
-    item.addEventListener("click", () => openMessage(index));
+    item.addEventListener("click", async () => {
+      // A message being written goes to Drafts first; saving can reload this list, so the row is
+      // looked up again by id
+      if (!(await leaveCompose())) return;
+      const current = state.messages.findIndex((m) => m.id === message.id);
+      if (current !== -1) openMessage(current);
+    });
     item.dataset.index = index;
     item.draggable = true;
     item.addEventListener("dragstart", (event) => {
@@ -432,8 +438,7 @@ function renderMessages() {
 
 /* Reading a message */
 
-// The right column shows one thing: the message being written, the open message, or a placeholder.
-// A message in progress wins: moving between folders and messages does not close it.
+// The right column shows one thing: the message being written, the open message, or a placeholder
 function syncReader() {
   const composing = Boolean(state.draft);
   $("compose").hidden = !composing;
@@ -456,6 +461,8 @@ async function openMessage(index) {
   const list = $("messages");
   [...list.children].forEach((row, i) => row.classList.toggle("selected", i === index));
   list.children[index]?.scrollIntoView({ block: "nearest" });
+  // A draft opens for editing, not for reading
+  if (state.folder.kind === "drafts") return openDraft(summary);
 
   const token = ++state.messageToken;
   let message;
@@ -520,7 +527,9 @@ function removeMessage(index, statusText) {
   renderMessages();
   showStatus(statusText);
   // The next message takes the removed one's place; open it so mail can be worked through in a row
-  if (wasOpen && state.messages.length > 0) openMessage(Math.min(index, state.messages.length - 1));
+  // (not in Drafts, where opening means editing)
+  const openNext = wasOpen && state.messages.length > 0 && state.folder.kind !== "drafts";
+  if (openNext) openMessage(Math.min(index, state.messages.length - 1));
 }
 
 // An action applies to the message shown on screen, not to the row selected in the list:
@@ -706,7 +715,9 @@ window.addEventListener("message", (event) => {
   }
 });
 
-/* Compose, reply, forward */
+/* Compose, reply, forward. A message being written lives in the form; when the user leaves it
+   with changes it is saved to the Drafts folder on the server, and opening it there brings it
+   back into the form. Any number of drafts can wait in Drafts. */
 
 const COMPOSE_TITLES = { new: "New message", reply: "Reply", replyAll: "Reply all", forward: "Forward" };
 
@@ -714,7 +725,42 @@ function withPrefix(prefix, pattern, subject) {
   return pattern.test(subject) ? subject : `${prefix}: ${subject}`;
 }
 
-function openCompose(mode, preset = {}) {
+// Addresses as text for a recipient field. A comma in a name would split the list
+function recipientText(list) {
+  return list
+    .map((person) => {
+      const name = person.name.replace(/[,;<>]/g, " ").replace(/\s+/g, " ").trim();
+      return name && name !== person.email ? `${name} <${person.email}>` : person.email;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function formSnapshot() {
+  return JSON.stringify(["compose-to", "compose-cc", "compose-subject", "compose-body"].map((id) => $(id).value));
+}
+
+function showCompose({ mode, referenceId = null, serverId = null, to = "", cc = "", subject = "", body = "" }) {
+  // serverId: the copy in Drafts, once there is one. loadedBody: the text that copy holds
+  state.draft = { mode, referenceId, serverId, loadedBody: serverId ? body : null };
+  $("compose-title").textContent = COMPOSE_TITLES[mode];
+  $("compose-to").value = to;
+  $("compose-cc").value = cc;
+  $("compose-subject").value = subject;
+  $("compose-body").value = body;
+  $("compose-body").setSelectionRange(0, 0);
+  state.files = [];
+  renderFiles();
+  $("compose-hint").textContent =
+    mode === "new" ? "" : "The original message will be added below your text when you send.";
+  // What Drafts holds right now (or, for a fresh message, what is not worth saving)
+  state.draft.saved = formSnapshot();
+  syncReader();
+  (to ? $("compose-body") : $("compose-to")).focus();
+}
+
+async function openCompose(mode, preset = {}) {
+  if (!(await leaveCompose())) return;
   const message = state.message;
   let to = preset.to || "";
   let cc = "";
@@ -738,33 +784,119 @@ function openCompose(mode, preset = {}) {
         ? withPrefix("FW", /^(fw|fwd)\s*:/i, message.subject)
         : withPrefix("RE", /^re\s*:/i, message.subject);
   }
-  const signature = getSignature();
-  const initialBody = signature ? `\n\n${signature}` : "";
-  state.draft = { mode, referenceId: mode === "new" ? null : message?.id, initialBody };
-  $("compose-title").textContent = COMPOSE_TITLES[mode];
-  $("compose-to").value = to;
-  $("compose-cc").value = cc;
-  $("compose-subject").value = subject;
   // The signature sits below blank lines for the text; in a reply the server adds the quote after it
-  $("compose-body").value = initialBody;
-  $("compose-body").setSelectionRange(0, 0);
-  state.files = [];
-  renderFiles();
-  $("compose-hint").textContent =
-    mode === "new" ? "" : "The original message will be added below your text automatically.";
-  syncReader();
-  (to ? $("compose-body") : $("compose-to")).focus();
+  const signature = getSignature();
+  showCompose({
+    mode,
+    referenceId: mode === "new" ? null : message?.id,
+    to,
+    cc,
+    subject,
+    body: signature ? `\n\n${signature}` : "",
+  });
+}
+
+async function openDraft(summary) {
+  const token = ++state.messageToken;
+  let draft;
+  try {
+    draft = await invoke("get_draft", { id: summary.id });
+  } catch (error) {
+    if (token === state.messageToken) showError(error);
+    return;
+  }
+  if (token !== state.messageToken) return;
+  state.message = null;
+  state.openId = null;
+  showCompose({
+    mode: draft.mode,
+    referenceId: draft.referenceId,
+    serverId: summary.id,
+    to: recipientText(draft.to),
+    cc: recipientText(draft.cc),
+    subject: draft.subject,
+    body: draft.body,
+  });
 }
 
 function closeCompose() {
   if (!state.draft) return;
   state.draft = null;
   hideSuggestions();
+  if (state.folder?.kind === "drafts" && state.selected !== -1) {
+    state.selected = -1;
+    renderMessages();
+  }
   syncReader();
 }
 
-function draftHasContent() {
-  return $("compose-body").value !== state.draft.initialBody || state.files.length > 0;
+function formOutgoing(attachments) {
+  const draft = state.draft;
+  const body = $("compose-body").value;
+  return {
+    attachments,
+    mode: draft.mode,
+    to: parseAddresses($("compose-to").value),
+    cc: parseAddresses($("compose-cc").value),
+    subject: $("compose-subject").value.trim(),
+    bodyHtml: `<div>${escapeHtml(body).replace(/\n/g, "<br>")}</div>`,
+    referenceId: draft.referenceId,
+    // An untouched body is left as stored: a draft made in Outlook keeps its formatting
+    keepBody: draft.loadedBody !== null && body === draft.loadedBody,
+  };
+}
+
+// Writes the form to Drafts if it changed since the last save. Returns false if that failed
+async function saveDraft() {
+  const draft = state.draft;
+  const snapshot = formSnapshot();
+  if (snapshot === draft.saved) return true;
+  try {
+    draft.serverId = await invoke("save_draft", { outgoing: formOutgoing([]), draftId: draft.serverId });
+  } catch (error) {
+    showError(error);
+    return false;
+  }
+  draft.saved = snapshot;
+  draft.loadedBody = $("compose-body").value;
+  return true;
+}
+
+// Drafts changed on the server: refresh its counter and, when it is the open folder, its list
+async function draftsChanged() {
+  reloadFolders().catch(() => {});
+  if (state.folder?.kind === "drafts" && !state.query) await loadMessages(true);
+}
+
+// Puts the message being written away: saved to Drafts if it has changes, then the form closes.
+// Returns false, leaving the form open, if saving failed — the text must not be lost
+async function leaveCompose() {
+  if (!state.draft) return true;
+  const changed = formSnapshot() !== state.draft.saved;
+  const hadFiles = state.files.length > 0;
+  if (changed && !(await saveDraft())) return false;
+  closeCompose();
+  if (changed) {
+    showStatus(hadFiles ? "Saved to Drafts, without the attached files" : "Saved to Drafts");
+    await draftsChanged();
+  }
+  return true;
+}
+
+async function discardDraft() {
+  const id = state.draft?.serverId;
+  if (id) {
+    try {
+      await invoke("delete_message", { id });
+    } catch (error) {
+      return showError(error);
+    }
+  }
+  closeCompose();
+  if (id) {
+    showStatus("Draft moved to Deleted Items");
+    await draftsChanged();
+  }
 }
 
 /* Files for a message. The server accepts a whole message up to its limit, usually 20–35 MB */
@@ -879,9 +1011,7 @@ function acceptSuggestion(index) {
   const input = suggest.input;
   if (!person || !input) return;
   const { start } = lastRecipient(input);
-  // A comma in a name would split the recipient list
-  const name = person.name.replace(/[,;<>]/g, " ").replace(/\s+/g, " ").trim();
-  const entry = name && name !== person.email ? `${name} <${person.email}>` : person.email;
+  const entry = recipientText([person]);
   input.value = `${input.value.slice(0, start)}${start ? " " : ""}${entry}, `;
   hideSuggestions();
   input.focus();
@@ -953,19 +1083,11 @@ $("compose").addEventListener("submit", async (event) => {
     const attachments = await Promise.all(
       state.files.map(async (file) => ({ name: file.name, contentBase64: await readAsBase64(file) })),
     );
-    await invoke("send_message", {
-      outgoing: {
-        attachments,
-        mode: state.draft.mode,
-        to,
-        cc,
-        subject: $("compose-subject").value.trim(),
-        bodyHtml: `<div>${escapeHtml($("compose-body").value).replace(/\n/g, "<br>")}</div>`,
-        referenceId: state.draft.referenceId,
-      },
-    });
+    const draftId = state.draft.serverId;
+    await invoke("send_message", { outgoing: formOutgoing(attachments), draftId });
     closeCompose();
     showStatus("Sent");
+    if (draftId) await draftsChanged();
   } catch (error) {
     showError(error);
   } finally {
@@ -975,7 +1097,8 @@ $("compose").addEventListener("submit", async (event) => {
 });
 
 $("compose-new").addEventListener("click", () => openCompose("new"));
-$("compose-cancel").addEventListener("click", closeCompose);
+$("compose-save").addEventListener("click", leaveCompose);
+$("compose-discard").addEventListener("click", discardDraft);
 $("reply").addEventListener("click", () => openCompose("reply"));
 $("reply-all").addEventListener("click", () => openCompose("replyAll"));
 $("forward").addEventListener("click", () => openCompose("forward"));
@@ -983,12 +1106,11 @@ $("forward").addEventListener("click", () => openCompose("forward"));
 /* Keyboard: J/K or arrows move through messages, R refreshes, N composes */
 
 document.addEventListener("keydown", (event) => {
-  if ($("app").hidden) return;
+  if ($("app").hidden || $("signature-dialog").open) return;
   if (state.draft) {
     if (event.key === "Escape") {
-      // Esc is easy to hit by accident, so it does not close a message in progress
-      if (draftHasContent()) showStatus("This message has text — use Cancel to close it");
-      else closeCompose();
+      // Esc puts the message away into Drafts; nothing typed is lost
+      leaveCompose();
     } else if (event.key === "Enter" && event.metaKey) {
       $("compose").requestSubmit();
     }

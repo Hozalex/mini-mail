@@ -20,6 +20,8 @@ pub fn run() {
             commands::respond_to_meeting,
             commands::set_badge,
             commands::send_message,
+            commands::save_draft,
+            commands::get_draft,
             commands::resolve_names,
             commands::open_link,
             commands::download_attachment,

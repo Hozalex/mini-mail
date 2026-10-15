@@ -13,6 +13,11 @@ pub type Result<T> = std::result::Result<T, String>;
 
 pub const PAGE_SIZE: u32 = 50;
 
+/// Custom property that marks a draft as a reply or forward and names the original message.
+/// A draft is stored as an ordinary message; the server builds the real reply, with the quoted
+/// original and threading, only when it is sent.
+const DRAFT_PROPERTY: &str = r#"<t:ExtendedFieldURI DistinguishedPropertySetId="PublicStrings" PropertyName="MiniMailDraft" PropertyType="String"/>"#;
+
 /// Error text for a rejected sign-in. The background mail check compares against it to learn
 /// that the password no longer works and to stop hitting the server.
 pub const AUTH_ERROR: &str = "The server rejected the username or password";
@@ -133,6 +138,25 @@ pub struct Outgoing {
     pub reference_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+    /// When updating a draft, leave its stored body alone (the text was not edited)
+    #[serde(default)]
+    pub keep_body: bool,
+}
+
+/// A message saved in Drafts, as the compose form needs it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Draft {
+    pub id: String,
+    pub subject: String,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    /// Plain text: the server converts the stored HTML body
+    pub body: String,
+    /// new | reply | replyAll | forward
+    pub mode: String,
+    /// Original message of a reply or forward draft
+    pub reference_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -291,13 +315,36 @@ impl Client {
             "decline" => "DeclineItem",
             _ => return Err("Unknown invitation response".to_string()),
         };
+        let reference = self.reference_item_id(id).await?;
         let raw = self
             .call(&format!(
-                r#"<m:CreateItem MessageDisposition="SendAndSaveCopy"><m:Items><t:{tag}><t:ReferenceItemId Id="{}"/></t:{tag}></m:Items></m:CreateItem>"#,
-                escape(id)
+                r#"<m:CreateItem MessageDisposition="SendAndSaveCopy"><m:Items><t:{tag}>{reference}</t:{tag}></m:Items></m:CreateItem>"#
             ))
             .await?;
         with_doc(&raw, true, |_| Ok(()))
+    }
+
+    /// The id of an item with its current ChangeKey. The server refuses to update, send or
+    /// respond to an item without the key, and the key changes whenever the item does (marking it
+    /// read is enough), so it is fetched right before use rather than remembered.
+    async fn current_item_id(&self, id: &str) -> Result<(String, String)> {
+        let raw = self
+            .call(&format!(
+                r#"<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape><m:ItemIds><t:ItemId Id="{}"/></m:ItemIds></m:GetItem>"#,
+                escape(id)
+            ))
+            .await?;
+        with_doc(&raw, true, parse_item_id)
+    }
+
+    /// `ReferenceItemId` for a reply, forward or invitation response.
+    async fn reference_item_id(&self, id: &str) -> Result<String> {
+        let (id, change_key) = self.current_item_id(id).await?;
+        Ok(format!(
+            r#"<t:ReferenceItemId Id="{}" ChangeKey="{}"/>"#,
+            escape(&id),
+            escape(&change_key)
+        ))
     }
 
     /// Finds people by the start of a name or address, in the company address book
@@ -386,83 +433,141 @@ impl Client {
     }
 
     /// Sends a message and keeps a copy in Sent Items. For a reply or a forward the server
-    /// adds the quoted original and its attachments itself.
-    pub async fn send(&self, outgoing: &Outgoing) -> Result<()> {
+    /// adds the quoted original and its attachments itself. `draft_id` is the Drafts copy the
+    /// message was written in, if it was ever saved.
+    pub async fn send(&self, outgoing: &Outgoing, draft_id: Option<&str>) -> Result<()> {
         if outgoing.to.is_empty() {
             return Err("Add at least one recipient".to_string());
         }
-        let subject = format!("<t:Subject>{}</t:Subject>", escape(&outgoing.subject));
-        let recipients = format!(
-            "{}{}",
-            recipients_xml("ToRecipients", &outgoing.to),
-            recipients_xml("CcRecipients", &outgoing.cc)
-        );
-        let body = escape(&outgoing.body_html);
+        let in_drafts = |error: String| format!("{error}. The message was not sent and is still in Drafts");
+
+        if outgoing.mode == "new" {
+            // A saved draft of a new message is itself what gets sent
+            if let Some(id) = draft_id {
+                self.update_draft(id, outgoing).await?;
+                return self
+                    .send_saved_item(id, &outgoing.attachments)
+                    .await
+                    .map_err(in_drafts);
+            }
+        }
+
         let item = match (outgoing.mode.as_str(), &outgoing.reference_id) {
-            ("new", _) => format!(
-                r#"<t:Message>{subject}<t:Body BodyType="HTML">{body}</t:Body>{recipients}</t:Message>"#
-            ),
+            ("new", _) => message_xml(outgoing, false),
             (mode @ ("reply" | "replyAll" | "forward"), Some(reference_id)) => {
                 let tag = match mode {
                     "reply" => "ReplyToItem",
                     "replyAll" => "ReplyAllToItem",
                     _ => "ForwardItem",
                 };
+                let reference = self.reference_item_id(reference_id).await?;
                 format!(
-                    r#"<t:{tag}>{subject}{recipients}<t:ReferenceItemId Id="{}"/><t:NewBodyContent BodyType="HTML">{body}</t:NewBodyContent></t:{tag}>"#,
-                    escape(reference_id)
+                    r#"<t:{tag}><t:Subject>{}</t:Subject>{}{reference}<t:NewBodyContent BodyType="HTML">{}</t:NewBodyContent></t:{tag}>"#,
+                    escape(&outgoing.subject),
+                    all_recipients_xml(outgoing),
+                    escape(&outgoing.body_html)
                 )
             }
             _ => return Err("Unknown message type".to_string()),
         };
+
         if outgoing.attachments.is_empty() {
             let raw = self
                 .call(&format!(
                     r#"<m:CreateItem MessageDisposition="SendAndSaveCopy"><m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems"/></m:SavedItemFolderId><m:Items>{item}</m:Items></m:CreateItem>"#
                 ))
                 .await?;
-            return with_doc(&raw, true, |_| Ok(()));
+            with_doc(&raw, true, |_| Ok(()))?;
+        } else {
+            // With files a message is sent in three steps: draft, attachments, send
+            attachments_xml(&outgoing.attachments)?;
+            let id = self.create_in_drafts(&item).await?;
+            self.send_saved_item(&id, &outgoing.attachments)
+                .await
+                .map_err(in_drafts)?;
         }
 
-        // With files a message is sent in three steps: draft, attachments, send
-        let files = attachments_xml(&outgoing.attachments)?;
+        // A reply was sent through the server's own reply object, so the draft it was written in
+        // is now a leftover. It goes to Deleted Items like everything else the app removes.
+        if let Some(id) = draft_id {
+            let _ = self.delete_message(id).await;
+        }
+        Ok(())
+    }
+
+    /// Saves the message being written to Drafts: creates it, or updates the copy saved earlier.
+    /// Returns the draft id. Attached files are not stored; they are added when the message is sent.
+    pub async fn save_draft(&self, outgoing: &Outgoing, draft_id: Option<&str>) -> Result<String> {
+        match draft_id {
+            Some(id) => {
+                self.update_draft(id, outgoing).await?;
+                Ok(id.to_string())
+            }
+            None => self.create_in_drafts(&message_xml(outgoing, true)).await,
+        }
+    }
+
+    /// Loads a draft for the compose form.
+    pub async fn get_draft(&self, id: &str) -> Result<Draft> {
+        let raw = self
+            .call(&format!(
+                r#"<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties><t:FieldURI FieldURI="item:Subject"/><t:FieldURI FieldURI="item:Body"/><t:FieldURI FieldURI="message:ToRecipients"/><t:FieldURI FieldURI="message:CcRecipients"/>{DRAFT_PROPERTY}</t:AdditionalProperties></m:ItemShape><m:ItemIds><t:ItemId Id="{}"/></m:ItemIds></m:GetItem>"#,
+                escape(id)
+            ))
+            .await?;
+        with_doc(&raw, true, parse_draft)
+    }
+
+    async fn create_in_drafts(&self, item: &str) -> Result<String> {
         let raw = self
             .call(&format!(
                 r#"<m:CreateItem MessageDisposition="SaveOnly"><m:SavedItemFolderId><t:DistinguishedFolderId Id="drafts"/></m:SavedItemFolderId><m:Items>{item}</m:Items></m:CreateItem>"#
             ))
             .await?;
-        let draft_id = with_doc(&raw, true, |doc| {
-            find(doc.root(), "ItemId")
-                .and_then(|n| n.attribute("Id"))
-                .map(str::to_string)
-                .ok_or_else(|| "The server did not return the draft id".to_string())
-        })?;
-        let in_drafts = |error: String| format!("{error}. The message was not sent and is still in Drafts");
+        with_doc(&raw, true, |doc| Ok(parse_item_id(doc)?.0))
+    }
+
+    async fn update_draft(&self, id: &str, outgoing: &Outgoing) -> Result<()> {
+        let (id, change_key) = self.current_item_id(id).await?;
         let raw = self
             .call(&format!(
-                r#"<m:CreateAttachment><m:ParentItemId Id="{}"/><m:Attachments>{files}</m:Attachments></m:CreateAttachment>"#,
-                escape(&draft_id)
+                r#"<m:UpdateItem MessageDisposition="SaveOnly" ConflictResolution="AlwaysOverwrite"><m:ItemChanges><t:ItemChange><t:ItemId Id="{}" ChangeKey="{}"/><t:Updates>{}</t:Updates></t:ItemChange></m:ItemChanges></m:UpdateItem>"#,
+                escape(&id),
+                escape(&change_key),
+                draft_updates_xml(outgoing)
             ))
-            .await
-            .map_err(in_drafts)?;
-        // Adding attachments gives the draft a new version; the server will not send it without that key
-        let change_key = with_doc(&raw, true, |doc| {
-            doc.descendants()
-                .filter_map(|n| n.attribute("RootItemChangeKey"))
-                .last()
-                .map(str::to_string)
-                .ok_or_else(|| "The server did not confirm the attachments".to_string())
-        })
-        .map_err(in_drafts)?;
+            .await?;
+        with_doc(&raw, true, |_| Ok(()))
+    }
+
+    /// Sends an item that already sits in Drafts, first adding any files to it.
+    async fn send_saved_item(&self, id: &str, attachments: &[OutgoingAttachment]) -> Result<()> {
+        let (id, mut change_key) = self.current_item_id(id).await?;
+        if !attachments.is_empty() {
+            let files = attachments_xml(attachments)?;
+            let raw = self
+                .call(&format!(
+                    r#"<m:CreateAttachment><m:ParentItemId Id="{}"/><m:Attachments>{files}</m:Attachments></m:CreateAttachment>"#,
+                    escape(&id)
+                ))
+                .await?;
+            // Adding attachments gives the item a new version; the server will not send it without that key
+            change_key = with_doc(&raw, true, |doc| {
+                doc.descendants()
+                    .filter_map(|n| n.attribute("RootItemChangeKey"))
+                    .last()
+                    .map(str::to_string)
+                    .ok_or_else(|| "The server did not confirm the attachments".to_string())
+            })?;
+        }
         let raw = self
             .call(&format!(
                 r#"<m:SendItem SaveItemToFolder="true"><m:ItemIds><t:ItemId Id="{}" ChangeKey="{}"/></m:ItemIds><m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems"/></m:SavedItemFolderId></m:SendItem>"#,
-                escape(&draft_id),
+                escape(&id),
                 escape(&change_key)
             ))
-            .await
-            .map_err(in_drafts)?;
-        with_doc(&raw, true, |_| Ok(())).map_err(in_drafts)
+            .await?;
+        with_doc(&raw, true, |_| Ok(()))
     }
 
     /// Ids of the mailbox root and the standard folders; the tree and its order are built from them.
@@ -757,6 +862,92 @@ fn parse_message(doc: &Document) -> Result<Message> {
     })
 }
 
+fn parse_item_id(doc: &Document) -> Result<(String, String)> {
+    let item_id = find(doc.root(), "ItemId").ok_or("The server did not return the message")?;
+    let attr = |name| item_id.attribute(name).unwrap_or_default().to_string();
+    Ok((attr("Id"), attr("ChangeKey")))
+}
+
+fn parse_draft(doc: &Document) -> Result<Draft> {
+    let item = find(doc.root(), "Items")
+        .and_then(|items| items.children().find(|n| n.is_element()))
+        .ok_or("The server did not return the draft")?;
+    // The marker is "mode|id of the original message"; a draft without it is a new message
+    let marker = child(item, "ExtendedProperty")
+        .map(|n| child_text(n, "Value"))
+        .unwrap_or_default();
+    let (mode, reference_id) = match marker.split_once('|') {
+        Some((mode @ ("reply" | "replyAll" | "forward"), id)) if !id.is_empty() => {
+            (mode.to_string(), Some(id.to_string()))
+        }
+        _ => ("new".to_string(), None),
+    };
+    Ok(Draft {
+        id: child_attr(item, "ItemId", "Id"),
+        subject: child_text(item, "Subject"),
+        to: child(item, "ToRecipients").map(mailboxes).unwrap_or_default(),
+        cc: child(item, "CcRecipients").map(mailboxes).unwrap_or_default(),
+        body: child_text(item, "Body").replace("\r\n", "\n").trim_end().to_string(),
+        mode,
+        reference_id,
+    })
+}
+
+fn all_recipients_xml(outgoing: &Outgoing) -> String {
+    format!(
+        "{}{}",
+        recipients_xml("ToRecipients", &outgoing.to),
+        recipients_xml("CcRecipients", &outgoing.cc)
+    )
+}
+
+/// A plain message for `CreateItem`. With `as_draft`, a reply or forward also carries the marker
+/// that lets the draft be sent as a real reply later.
+fn message_xml(outgoing: &Outgoing, as_draft: bool) -> String {
+    let marker = match &outgoing.reference_id {
+        Some(id) if as_draft && outgoing.mode != "new" => format!(
+            "<t:ExtendedProperty>{DRAFT_PROPERTY}<t:Value>{}|{}</t:Value></t:ExtendedProperty>",
+            escape(&outgoing.mode),
+            escape(id)
+        ),
+        _ => String::new(),
+    };
+    format!(
+        r#"<t:Message><t:Subject>{}</t:Subject><t:Body BodyType="HTML">{}</t:Body>{marker}{}</t:Message>"#,
+        escape(&outgoing.subject),
+        escape(&outgoing.body_html),
+        all_recipients_xml(outgoing)
+    )
+}
+
+/// Field changes that bring a saved draft in line with the compose form.
+fn draft_updates_xml(outgoing: &Outgoing) -> String {
+    let set = |field: &str, value: String| {
+        format!(r#"<t:SetItemField><t:FieldURI FieldURI="{field}"/><t:Message>{value}</t:Message></t:SetItemField>"#)
+    };
+    // An emptied recipient line has to be removed explicitly: an empty list is not valid XML here
+    let recipients = |field: &str, tag: &str, addresses: &[String]| {
+        if addresses.is_empty() {
+            format!(r#"<t:DeleteItemField><t:FieldURI FieldURI="{field}"/></t:DeleteItemField>"#)
+        } else {
+            set(field, recipients_xml(tag, addresses))
+        }
+    };
+    let mut updates = set(
+        "item:Subject",
+        format!("<t:Subject>{}</t:Subject>", escape(&outgoing.subject)),
+    );
+    if !outgoing.keep_body {
+        updates.push_str(&set(
+            "item:Body",
+            format!(r#"<t:Body BodyType="HTML">{}</t:Body>"#, escape(&outgoing.body_html)),
+        ));
+    }
+    updates.push_str(&recipients("message:ToRecipients", "ToRecipients", &outgoing.to));
+    updates.push_str(&recipients("message:CcRecipients", "CcRecipients", &outgoing.cc));
+    updates
+}
+
 fn parse_meeting(doc: &Document, is_request: bool) -> Result<Meeting> {
     let item = find(doc.root(), "Items")
         .and_then(|items| items.children().find(|n| n.is_element()))
@@ -1038,6 +1229,70 @@ mod tests {
             ("2026-10-12T07:00:00Z", "Room 3", "Ivan")
         );
         assert!(meeting.is_request && !meeting.all_day && !meeting.out_of_date);
+    }
+
+    fn outgoing(mode: &str, reference_id: Option<&str>) -> Outgoing {
+        Outgoing {
+            mode: mode.into(),
+            to: vec!["a@x.ru".into()],
+            cc: vec![],
+            subject: "Hi & bye".into(),
+            body_html: "<div>text</div>".into(),
+            reference_id: reference_id.map(Into::into),
+            attachments: vec![],
+            keep_body: false,
+        }
+    }
+
+    #[test]
+    fn parses_item_id_with_change_key() {
+        let xml = r#"<r><Items><Message><ItemId Id="AAMk+a/b=" ChangeKey="CQAAAB"/></Message></Items></r>"#;
+        assert_eq!(
+            with_doc(xml, true, parse_item_id).unwrap(),
+            ("AAMk+a/b=".to_string(), "CQAAAB".to_string())
+        );
+    }
+
+    #[test]
+    fn draft_of_a_reply_carries_the_marker_and_a_sent_message_does_not() {
+        let reply = outgoing("reply", Some("ORIG="));
+        let draft = message_xml(&reply, true);
+        assert!(draft.contains("<t:Value>reply|ORIG=</t:Value>"));
+        assert!(draft.contains("<t:Subject>Hi &amp; bye</t:Subject>"));
+        // Schema order: the extended property comes after the body and before the recipients
+        assert!(draft.find("</t:Body>").unwrap() < draft.find("<t:ExtendedProperty>").unwrap());
+        assert!(draft.find("</t:ExtendedProperty>").unwrap() < draft.find("<t:ToRecipients>").unwrap());
+        assert!(!message_xml(&reply, false).contains("ExtendedProperty"));
+        assert!(!message_xml(&outgoing("new", None), true).contains("ExtendedProperty"));
+    }
+
+    #[test]
+    fn draft_update_removes_emptied_recipients_and_can_keep_the_body() {
+        let mut edited = outgoing("new", None);
+        let updates = draft_updates_xml(&edited);
+        assert!(updates.contains(r#"<t:SetItemField><t:FieldURI FieldURI="item:Body"/>"#));
+        assert!(updates.contains(r#"<t:SetItemField><t:FieldURI FieldURI="message:ToRecipients"/>"#));
+        assert!(updates.contains(r#"<t:DeleteItemField><t:FieldURI FieldURI="message:CcRecipients"/>"#));
+        edited.keep_body = true;
+        assert!(!draft_updates_xml(&edited).contains("item:Body"));
+    }
+
+    #[test]
+    fn parses_draft() {
+        let xml = r#"<r><Items><Message><ItemId Id="D1" ChangeKey="k"/><Subject>RE: Plan</Subject>
+            <Body BodyType="Text">line one&#13;&#10;line two&#13;&#10;</Body>
+            <ExtendedProperty><ExtendedFieldURI PropertyName="MiniMailDraft"/><Value>replyAll|ORIG=</Value></ExtendedProperty>
+            <ToRecipients><Mailbox><Name>Ivan</Name><EmailAddress>ivan@x.ru</EmailAddress></Mailbox></ToRecipients>
+        </Message></Items></r>"#;
+        let draft = with_doc(xml, true, parse_draft).unwrap();
+        assert_eq!((draft.id.as_str(), draft.mode.as_str()), ("D1", "replyAll"));
+        assert_eq!(draft.reference_id.as_deref(), Some("ORIG="));
+        assert_eq!(draft.body, "line one\nline two");
+        assert_eq!((draft.to.len(), draft.cc.len()), (1, 0));
+
+        let plain = r#"<r><Items><Message><ItemId Id="D2"/><Subject>Note</Subject></Message></Items></r>"#;
+        let draft = with_doc(plain, true, parse_draft).unwrap();
+        assert_eq!((draft.mode.as_str(), draft.reference_id), ("new", None));
     }
 
     #[test]

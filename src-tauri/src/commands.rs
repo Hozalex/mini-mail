@@ -8,7 +8,9 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::ews::{self, Address, Client, Folder, Message, MessagePage, MessageSummary, Outgoing};
+use crate::ews::{
+    self, Address, Client, Draft, Folder, Message, MessagePage, MessageSummary, Outgoing,
+};
 
 const KEYCHAIN_SERVICE: &str = "mini-mail";
 const NEW_MAIL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -319,8 +321,27 @@ pub fn set_badge(app: AppHandle, count: i64) {
 }
 
 #[tauri::command]
-pub async fn send_message(state: State<'_, AppState>, outgoing: Outgoing) -> Result<(), String> {
-    client(&state)?.send(&outgoing).await
+pub async fn send_message(
+    state: State<'_, AppState>,
+    outgoing: Outgoing,
+    draft_id: Option<String>,
+) -> Result<(), String> {
+    client(&state)?.send(&outgoing, draft_id.as_deref()).await
+}
+
+/// Saves the message being written to Drafts and returns the draft id.
+#[tauri::command]
+pub async fn save_draft(
+    state: State<'_, AppState>,
+    outgoing: Outgoing,
+    draft_id: Option<String>,
+) -> Result<String, String> {
+    client(&state)?.save_draft(&outgoing, draft_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn get_draft(state: State<'_, AppState>, id: String) -> Result<Draft, String> {
+    client(&state)?.get_draft(&id).await
 }
 
 /// Opens a link from a message in the default browser.

@@ -58,8 +58,16 @@ to `PATH`.
 - **Every value placed into XML goes through `escape()`.** That covers ids, names and text.
 - **Server data reaches the DOM only through `textContent`** (the `el` helper). Message HTML is
   shown exclusively in the isolated `#msg-body` frame.
-- **A message being written never closes on its own.** Moving between folders and messages leaves
-  it alone; only Cancel, sending, or Esc on an empty body close it.
+- **Text being written is never lost silently.** Leaving the compose form with changes (opening
+  another message, starting another one, Esc, "Save draft") saves it to the Drafts folder on the
+  server first; if saving fails the form stays open. Only "Discard" throws a message away, and a
+  saved draft then goes to Deleted Items.
+- **A draft is an ordinary message in Drafts.** Opening one there loads it back into the form. A
+  reply or forward draft carries the `MiniMailDraft` extended property (`mode|original id`); the
+  real reply, with quote and threading, is built by the server only on send, after which the
+  draft copy is moved to Deleted Items. A new-message draft is sent as itself.
+- **Attached files are not stored in drafts.** They exist only in the open form and are uploaded
+  on send.
 - **An action applies to the message on screen.** Delete and invitation responses use
   `state.openId`, not the selected row: while the next message loads, these differ.
 - **The background check stops on an authentication error.** Retrying with an old password locks
@@ -95,3 +103,6 @@ links.
 - Every request is sent with `RequestServerVersion Version="Exchange2013"`; the server does not
   understand operations from newer versions.
 - After an invitation response the server removes the invitation from the Inbox itself.
+- Replies, forwards and invitation responses need the current `ChangeKey` on `ReferenceItemId`
+  (`ErrorChangeKeyRequiredForWriteOperations`). The key changes whenever the item does, so
+  `reference_item_id` fetches it right before the request.
